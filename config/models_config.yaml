@@ -1,0 +1,62 @@
+# ===============================
+# LLM / MLLM Model Configuration
+# ===============================
+
+models:
+
+  # -------- Text-only LLMs --------
+  gpt-4o:
+    api_type: "openai"
+    api_key_env: "OPENAI_API_KEY"
+    multimodal: true
+    description: "GPT-4o multimodal model (text + image)"
+
+  gpt-4-turbo:
+    api_type: "openai"
+    api_key_env: "OPENAI_API_KEY"
+    multimodal: false
+    description: "GPT-4 Turbo text-only model"
+
+  llama-3.1-8b-instant:
+    api_type: "groq"
+    api_key_env: "GROQ_API_KEY"
+    multimodal: false
+    description: "Fast LLaMA 3.1 text-only model via Groq"
+
+  mixtral-8x7b-32768:
+    api_type: "groq"
+    api_key_env: "GROQ_API_KEY"
+    multimodal: false
+    description: "Mixtral MoE text-only model via Groq"
+
+  # -------- Vision / Multimodal Models --------
+  llama-3.2-11b-vision-preview:
+    api_type: "groq"
+    api_key_env: "GROQ_API_KEY"
+    multimodal: true
+    description: "LLaMA 3.2 vision model (image + text)"
+
+  llama-3.2-90b-vision-preview:
+    api_type: "groq"
+    api_key_env: "GROQ_API_KEY"
+    multimodal: true
+    description: "Large LLaMA 3.2 vision model"
+
+  claude-3-5-sonnet-20241022:
+    api_type: "anthropic"
+    api_key_env: "ANTHROPIC_API_KEY"
+    multimodal: true
+    description: "Claude 3.5 Sonnet multimodal model"
+
+  gemini-1.5-pro:
+    api_type: "google"
+    api_key_env: "GEMINI_API_KEY"
+    multimodal: true
+    description: "Gemini 1.5 Pro multimodal model"
+
+# -------------------------------
+# Default models per capability
+# -------------------------------
+default_models:
+  text: "gpt-4-turbo"
+  vision: "gpt-4o"
