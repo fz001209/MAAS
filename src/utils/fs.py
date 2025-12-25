@@ -14,24 +14,20 @@ def write_text(path:str|Path, content:str, encoding:str="utf-8")-> None:
     ensure_dir(path.parent)
     path.write_text(content, encoding=encoding)
 
-
 def write_json(path:str|Path, data:Dict[str, Any], encoding:str="utf-8")->None:
     path=Path(path)
     ensure_dir(path.parent)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding=encoding)
 
-
 def read_json(path:str|Path, encoding:str="utf-8")->Dict[str, Any]:
     path=Path(path)
     return json.loads(path.read_text(encoding=encoding))
-
 
 def copy_file(src: str|Path, dst: str|Path) -> None:
     src=Path(src)
     dst=Path(dst)
     ensure_dir(dst.parent)
     shutil.copy2(src, dst)
-
 
 def copy_tree(src_dir: str|Path, dst_dir: str|Path) -> None:
     src_dir=Path(src_dir)
