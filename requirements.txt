@@ -1,0 +1,7 @@
+# core
+pyyaml
+pyautogen
+
+# CAD execution
+cadquery
+ocp_vscode
