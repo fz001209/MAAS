@@ -1,79 +1,104 @@
-#######################################
-# Python / Runtime
-#######################################
+# ===============================
+# Python
+# ===============================
 __pycache__/
-**/__pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
-.env
+*.so
+*.egg-info/
+.eggs/
+*.egg
+
+# Virtual environments
 .venv/
 venv/
+env/
+ENV/
 
-#######################################
-# IDE / OS
-#######################################
+# ===============================
+# IDE / Editor
+# ===============================
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+
+# ===============================
+# OS
+# ===============================
 .DS_Store
 Thumbs.db
-.idea/
-.vscode/
 
-#######################################
-# Workspace (runtime data, NOT versioned)
-#######################################
-workspace/
-workspace/**
-runs/
-runs/**
-
-#######################################
-# Temporary / Cache
-#######################################
-tmp/
-tmp/**
-.cache/
-.cache/**
-pip-wheel-metadata/
-
-#######################################
-# Logs / Events / Metrics (auto-generated)
-#######################################
+# ===============================
+# Logs & Runtime Outputs
+# ===============================
 *.log
-event*.json
-events*.json
-metrics*.json
-verify_report*.json
-exec_log*.txt
+exec.log
+exec_log.txt
+exec_log.json
 
-#######################################
-# CAD / Geometry Outputs (generated)
-#######################################
+# ===============================
+# Generated CAD Artifacts
+# ===============================
+# CAD exports
 *.stl
 *.step
 *.stp
-*.brep
-*.scad
 *.iges
 *.igs
 *.obj
-*.glb
 
-#######################################
-# Test outputs
-#######################################
-tests/results/
-tests/results/**
+# Rendered images
+*.png
+*.jpg
+*.jpeg
 
-#######################################
-# Large generated CAD collections
-#######################################
-NewCADs/
-NewCADs/**
-GeneratedCADs/
-GeneratedCADs/**
+# CAD working directories
+output/
+outputs/
+artifacts/
+artifacts/
+render/
+renders/
+workdir/
+working_dir/
 
-#######################################
-# Safety: keep docs & examples tracked
-#######################################
-!docs/**
-!README.md
+# ===============================
+# AutoGen / Agent Runtime
+# ===============================
+chat_history/
+conversation_logs/
+agent_runs/
+
+# ===============================
+# Memory & Event Logs (Generated)
+# ===============================
+events_merged.json
+event_*.json
+memory_store/
+memory/
+
+# ===============================
+# Temporary / Intermediate Files
+# ===============================
+output_manifest.json
+verify_report.json
+metrics_report.json
+opt_patch.json
+next_inputs.json
+
+# ===============================
+# Secrets / Credentials
+# ===============================
+.env
+.env.*
+*.key
+*.pem
+
+# ===============================
+# Jupyter (if any)
+# ===============================
+.ipynb_checkpoints/
+
