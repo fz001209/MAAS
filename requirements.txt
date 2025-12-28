@@ -1,7 +1,10 @@
 # core
-pyyaml
+pyyaml>=6.0
+
+# LLM orchestration (AutoGen / AG2)
 autogen==0.10.3
+ag2[openai]==0.10.3
 
 # CAD execution
 cadquery==2.6.1
-ocp_vscode==3.0.1
+ocp_vscode>=3.0.0
