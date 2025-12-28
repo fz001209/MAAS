@@ -41,9 +41,9 @@
 
 requirements.txt
 README.md
+main.py
 MAAS/
   src/
-    main.py
     agents/
       create_agents.py
       pipeline.py
