@@ -19,7 +19,7 @@ def create_mainpath_agents(llm_config: dict, system_message_path: str = "config/
         human_input_mode="NEVER",
         max_consecutive_auto_reply=50,
         code_execution_config=False,
-        llm_config=llm_config,
+        llm_config=False,
         system_message="You are the user proxy for running the pipeline. Provide inputs and accept outputs.",
     )
 
