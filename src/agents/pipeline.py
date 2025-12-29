@@ -4,6 +4,8 @@ import json
 import os
 import re
 import subprocess
+import sys
+import base64
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -105,22 +107,74 @@ def agent2_cad_writer(run_id: str, paths: Dict[str, Path], plan_path: Path, agen
         "plan_json": plan,
         "required_output_file": str(cad_script_path),
         "instructions": (
-            "Generate a single, complete CadQuery Python script that creates the model, exports STEP+STL "
-            "to artifacts/, and tries to export a few PNG screenshots into artifacts/render/ if possible."
+            "Generate a single, complete CadQuery Python script.\n"
+            "Hard requirements:\n"
+            "1) Use `import cadquery as cq`\n"
+            "2) The final model MUST be stored in a variable named `result` (a Workplane).\n"
+            "3) Export STEP using `result.val().exportStep(step_path)` (NOT result.exportStep)\n"
+            "4) Export STL using `result.val().exportStl(stl_path)`\n"
+            "5) Write outputs into the same folder as this script (use Path(__file__).parent)\n"
+            "6) If you add rendering, write PNGs into `render/` under output_dir.\n"
+            "Return only Python code."
         ),
     }
 
     resp = agent.generate_reply(messages=[{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}])
     text = resp if isinstance(resp, str) else resp.get("content", "")
 
-    # try extract code block if present; else treat as full script
+    # extract code block if present
     code = text
     m = re.search(r"```(?:python)?\s*(.*?)```", text, flags=re.S)
     if m:
         code = m.group(1).strip()
 
-    # ensure output dirs referenced exist
     ensure_dir(paths["artifacts"] / "render")
+
+    # -----------------------------
+    # SAFETY PATCH: fix common CadQuery export mistakes
+    # -----------------------------
+    # 1) If LLM wrote result.exportStep(...), rewrite to result.val().exportStep(...)
+    code = re.sub(r"\bresult\.exportStep\(", "result.val().exportStep(", code)
+    code = re.sub(r"\bresult\.exportStl\(", "result.val().exportStl(", code)
+
+    # 2) Ensure script uses output_dir = Path(__file__).resolve().parent
+    #    If not present, prepend a minimal header.
+    if "output_dir" not in code:
+        header = (
+            "from __future__ import annotations\n"
+            "from pathlib import Path\n"
+            "import cadquery as cq\n"
+            "import os\n\n"
+            "output_dir = Path(__file__).resolve().parent\n"
+            "render_dir = output_dir / 'render'\n"
+            "render_dir.mkdir(parents=True, exist_ok=True)\n\n"
+        )
+        # avoid double import cadquery if already exists
+        if "import cadquery as cq" in code:
+            # keep user's import, but still ensure output_dir exists
+            header = (
+                "from __future__ import annotations\n"
+                "from pathlib import Path\n"
+                "import os\n\n"
+                "output_dir = Path(__file__).resolve().parent\n"
+                "render_dir = output_dir / 'render'\n"
+                "render_dir.mkdir(parents=True, exist_ok=True)\n\n"
+            )
+        code = header + code
+
+    # 3) Ensure STEP/STL export exists; if not, append a footer that exports result
+    must_have_step = re.search(r"\.exportStep\(", code) is not None
+    must_have_stl = re.search(r"\.exportStl\(", code) is not None
+    footer_lines = []
+    if not must_have_step:
+        footer_lines.append("step_path = str(output_dir / 'model.step')")
+        footer_lines.append("result.val().exportStep(step_path)")
+    if not must_have_stl:
+        footer_lines.append("stl_path = str(output_dir / 'model.stl')")
+        footer_lines.append("result.val().exportStl(stl_path)")
+    if footer_lines:
+        code = code.rstrip() + "\n\n# --- auto-added exports (pipeline safety) ---\n" + "\n".join(footer_lines) + "\n"
+
     write_text(cad_script_path, code)
 
     write_json(event_path, build_event(
@@ -142,8 +196,12 @@ def agent3_executor(run_id: str, paths: Dict[str, Path], cad_script_path: Path, 
         outputs={"output_manifest": str(manifest_path), "exec_log": str(exec_log_path), "event": str(event_path)},
     ))
 
-    # execute script
-    rc, out = _safe_run(["python", str(cad_script_path)], cwd=paths["artifacts"], timeout=180)
+    # IMPORTANT: always run with current venv python, and absolute script path
+    script_abs = Path(cad_script_path).resolve()
+    py_exe = sys.executable  # uses the current interpreter (venv)
+
+    # execute script in artifacts dir (outputs land next to script)
+    rc, out = _safe_run([py_exe, str(script_abs)], cwd=paths["artifacts"], timeout=180)
     write_text(exec_log_path, out)
 
     # collect artifacts
@@ -156,24 +214,26 @@ def agent3_executor(run_id: str, paths: Dict[str, Path], cad_script_path: Path, 
     manifest = {
         "run_id": run_id,
         "status": "success" if rc == 0 else "fail",
-        "cad_script": str(cad_script_path),
+        "cad_script": str(script_abs),
         "step_files": step_files,
         "stl_files": stl_files,
         "render_images": imgs,
         "exec_log_path": str(exec_log_path),
         "artifacts_dir": str(paths["artifacts"]),
+        "return_code": rc,
     }
     write_json(manifest_path, manifest)
 
     write_json(event_path, build_event(
         run_id, "3", "Agent3_Executor", "success" if rc == 0 else "fail",
-        inputs={"cad_script": str(cad_script_path)},
+        inputs={"cad_script": str(script_abs)},
         outputs={"output_manifest": str(manifest_path), "exec_log": str(exec_log_path)},
         message="execution finished",
         error="" if rc == 0 else f"Execution failed, return code {rc}",
     ))
 
     return manifest_path
+
 
 def agent4a_verifier(run_id: str, paths: Dict[str, Path], plan_path: Path, manifest_path: Path, agent) -> Path:
     verify_path = paths["artifacts"] / "verify_report.json"
@@ -283,7 +343,11 @@ def agent6_memory(
     merged_events_path = paths["artifacts"] / "events_merged.json"
     final_zip_path = paths["artifacts"] / "final_model.zip"
 
-    # 1) copy all artifacts + input into memory (实体文件要求)
+    # ensure memory subfolders
+    ensure_dir(paths["memory"] / "input")
+    ensure_dir(paths["memory"] / "artifacts")
+
+    # 1) copy all artifacts + input into memory
     copy_file(user_input_path, paths["memory"] / "input" / user_input_path.name)
     copy_tree(paths["artifacts"], paths["memory"] / "artifacts")
 
@@ -300,18 +364,18 @@ def agent6_memory(
     # 3) zip final package
     import zipfile
     with zipfile.ZipFile(final_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        # include selected final files
         for f in final_files_to_package:
             if f.exists():
                 z.write(f, arcname=f"artifacts/{f.name}")
-        # include verify evidence images
+
         render_dir = paths["artifacts"] / "render"
         if render_dir.exists():
             for p in sorted(render_dir.glob("*.png")):
                 z.write(p, arcname=f"artifacts/render/{p.name}")
-        # include merged events
+
         z.write(merged_events_path, arcname="events_merged.json")
 
     copy_file(final_zip_path, paths["memory"] / "final_model.zip")
 
     return final_zip_path, merged_events_path
+
