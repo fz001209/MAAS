@@ -442,45 +442,54 @@ def agent6_memory(
     copy_file(merged_events_path, base_paths["memory"] / "events_merged.json")
 
     # 3) zip package
-    import zipfile
+        import zipfile
+
+    def _safe_arcname(p: Path, base_dir: Path) -> str:
+        """把真实路径映射为 zip 内部路径，统一用相对路径，避免重复/混乱。"""
+        p = p.resolve()
+        try:
+            rel = p.relative_to(base_dir.resolve())
+            return str(rel).replace("\\", "/")
+        except Exception:
+            # 兜底：只放文件名（不推荐，但不会炸）
+            return p.name
+
     with zipfile.ZipFile(final_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        # include selected final files (dedupe)
         seen = set()
-        for f in final_files_to_package:
-            try:
-                fp = Path(f)
-            except Exception:
-                continue
-            if not fp.exists():
-                continue
-            key = str(fp.resolve())
-            if key in seen:
-                continue
-            seen.add(key)
 
-            # keep relative layout under run/
-            try:
-                rel = fp.resolve().relative_to(base_paths["run"].resolve())
-                z.write(fp, arcname=str(rel).replace("\\", "/"))
-            except Exception:
-                z.write(fp, arcname=f"artifacts/{fp.name}")
+        def add_file(file_path: Path, arcname: str):
+            arcname = arcname.replace("\\", "/")
+            if arcname in seen:
+                return
+            if not file_path.exists() or not file_path.is_file():
+                return
+            z.write(file_path, arcname=arcname)
+            seen.add(arcname)
 
-        # include merged events
-        z.write(merged_events_path, arcname="events_merged.json")
-
-        # include full artifacts tree (optional but useful for reproducibility)
-        artifacts_root = base_paths["run"] / "artifacts"
-        if artifacts_root.exists():
-            for p in sorted(artifacts_root.rglob("*")):
+        # 1) 打包“memory/artifacts”整棵树（这里最完整，包含 attempt_01/02/03）
+        mem_artifacts_dir = (paths["memory"] / "artifacts").resolve()
+        if mem_artifacts_dir.exists():
+            for p in mem_artifacts_dir.rglob("*"):
                 if p.is_file():
-                    rel = p.relative_to(base_paths["run"])
-                    z.write(p, arcname=str(rel).replace("\\", "/"))
+                    arc = "artifacts/" + _safe_arcname(p, mem_artifacts_dir)
+                    add_file(p, arc)
 
-        # include full events tree
-        if events_root.exists():
-            for p in sorted(events_root.rglob("event*.json")):
-                rel = p.relative_to(base_paths["run"])
-                z.write(p, arcname=str(rel).replace("\\", "/"))
+        # 2) 打包渲染图（如果你渲染图不在 memory/artifacts 里，也可以保留）
+        render_dir = paths["artifacts"] / "render"
+        if render_dir.exists():
+            for p in sorted(render_dir.glob("*.png")):
+                add_file(p, f"artifacts/render/{p.name}")
+
+        # 3) 打包 merged events
+        add_file(merged_events_path, "events_merged.json")
+
+        # 4) （可选）如果你仍想额外塞 final_files_to_package，必须去重 arcname
+        #    建议：只塞“顶层最终产物”，不要塞 attempt_x 里的东西，否则必然重复。
+        #    这里我按“只塞文件名到 artifacts/”处理，避免重复 attempt_* 路径。
+        for f in final_files_to_package:
+            f = Path(f)
+            if f.exists() and f.is_file():
+                add_file(f, f"artifacts/{f.name}")
 
     copy_file(final_zip_path, base_paths["memory"] / "final_model.zip")
 
