@@ -441,7 +441,7 @@ def agent6_memory(
     write_json(merged_events_path, merged)
     copy_file(merged_events_path, base_paths["memory"] / "events_merged.json")
 
-        # 3) zip package
+    # 3) zip package
     import zipfile
     
     def _safe_arcname(p: Path, base_dir: Path) -> str:
