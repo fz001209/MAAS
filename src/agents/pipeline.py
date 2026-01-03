@@ -3,7 +3,9 @@ from __future__ import annotations
 import sys
 import json
 import re
+import struct
 import subprocess
+from PIL import Image
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -63,6 +65,139 @@ def stage_paths(base_run_dir: Path, attempt: int | None = None) -> Dict[str, Pat
     }
 
 
+# ---------------------------
+# STL -> PNG rendering (minimal, matplotlib)
+# ---------------------------
+def _parse_stl_triangles(stl_path: Path) -> List[List[List[float]]]:
+    """
+    Return triangles as [[[x,y,z],[x,y,z],[x,y,z]], ...]
+    Supports binary STL and ASCII STL (best-effort).
+    """
+    data = stl_path.read_bytes()
+    if len(data) < 84:
+        return []
+
+    tri_count = struct.unpack("<I", data[80:84])[0]
+    expected_len = 84 + tri_count * 50
+    triangles: List[List[List[float]]] = []
+
+    # binary STL
+    if expected_len == len(data):
+        off = 84
+        for _ in range(tri_count):
+            off += 12  # normal
+            v1 = struct.unpack("<fff", data[off:off + 12]); off += 12
+            v2 = struct.unpack("<fff", data[off:off + 12]); off += 12
+            v3 = struct.unpack("<fff", data[off:off + 12]); off += 12
+            off += 2  # attribute
+            triangles.append([[v1[0], v1[1], v1[2]], [v2[0], v2[1], v2[2]], [v3[0], v3[1], v3[2]]])
+        return triangles
+
+    # ASCII best-effort
+    try:
+        text = data.decode("utf-8", errors="ignore")
+    except Exception:
+        return []
+
+    verts: List[List[float]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.lower().startswith("vertex "):
+            parts = line.split()
+            if len(parts) >= 4:
+                try:
+                    x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+                    verts.append([x, y, z])
+                    if len(verts) == 3:
+                        triangles.append([verts[0], verts[1], verts[2]])
+                        verts = []
+                except Exception:
+                    pass
+    return triangles
+
+
+def _render_stl_to_png(stl_path: Path, png_path: Path, elev: float, azim: float) -> Tuple[bool, str]:
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    except Exception as e:
+        return False, f"matplotlib not available: {e}"
+
+    try:
+        tris = _parse_stl_triangles(stl_path)
+        if not tris:
+            return False, "no triangles parsed from STL"
+
+        fig = plt.figure(figsize=(6, 6), dpi=180)
+        ax = fig.add_subplot(111, projection="3d")
+
+        poly = Poly3DCollection(
+            tris,
+            linewidths=0.2,
+            edgecolors="black",
+        )
+        ax.add_collection3d(poly)
+
+        xs = [p[0] for tri in tris for p in tri]
+        ys = [p[1] for tri in tris for p in tri]
+        zs = [p[2] for tri in tris for p in tri]
+
+        if not xs or not ys or not zs:
+            return False, "empty bounds"
+
+        # equal-ish scale
+        dx = max(xs) - min(xs)
+        dy = max(ys) - min(ys)
+        dz = max(zs) - min(zs)
+        m = max(dx, dy, dz) if max(dx, dy, dz) > 0 else 1.0
+        cx = (max(xs) + min(xs)) / 2
+        cy = (max(ys) + min(ys)) / 2
+        cz = (max(zs) + min(zs)) / 2
+        ax.set_xlim(cx - m / 2, cx + m / 2)
+        ax.set_ylim(cy - m / 2, cy + m / 2)
+        ax.set_zlim(cz - m / 2, cz + m / 2)
+
+        ax.view_init(elev=elev, azim=azim)
+        ax.set_axis_off()
+
+        ensure_dir(png_path.parent)
+        fig.savefig(png_path, bbox_inches="tight", pad_inches=0.02)
+        plt.close(fig)
+        return True, "rendered"
+    except Exception as e:
+        return False, f"render failed: {e}"
+
+
+def _render_stl_to_png_multi6(stl_path: Path, render_dir: Path) -> Tuple[bool, str]:
+    """
+    Generate 6 standard views to improve 4A robustness.
+    """
+    ensure_dir(render_dir)
+
+    views = [
+        ("view_iso_1.png", 25, 45),
+        ("view_iso_2.png", 25, 135),
+        ("view_front.png", 0, 0),
+        ("view_back.png", 0, 180),
+        ("view_left.png", 0, 90),
+        ("view_top.png", 90, 0),
+    ]
+
+    ok_any = False
+    msgs: List[str] = []
+    for name, elev, azim in views:
+        ok, msg = _render_stl_to_png(stl_path, render_dir / name, elev=elev, azim=azim)
+        ok_any = ok_any or ok
+        msgs.append(f"{name}:{'ok' if ok else 'fail'}({msg})")
+
+    return ok_any, "; ".join(msgs)
+
+
+# ---------------------------
+# Agents
+# ---------------------------
 def agent1_planner(run_id: str, paths: Dict[str, Path], anforderungsliste_path: Path, agent, attempt: int) -> Path:
     plan_path = paths["artifacts"] / "plan.json"
     event_path = paths["events"] / "event1.json"
@@ -98,35 +233,24 @@ def agent1_planner(run_id: str, paths: Dict[str, Path], anforderungsliste_path: 
 
 def _normalize_cadquery_export(code: str) -> str:
     """
-    关键：强制统一为 CadQuery 2.x 最稳健的 exporters.export()。
-    目标：
-      - 不再依赖 result.val().export_step/export_stl（容易遇到 Solid 路径问题）
-      - 不再依赖 cq.exporters.export 的多种写法
+    强制统一为 CadQuery 2.x 最稳健的 exporters.export() 并追加强制导出块。
     """
     s = code
 
-    # 确保有 sys
     if "import sys" not in s:
         s = "import sys\n" + s
 
-    # 确保 exporters 导入
     if "from cadquery import exporters" not in s:
-        # 放在 import cadquery as cq 之后更自然
         if "import cadquery as cq" in s:
             s = s.replace("import cadquery as cq", "import cadquery as cq\nfrom cadquery import exporters", 1)
         else:
             s = "import cadquery as cq\nfrom cadquery import exporters\n" + s
 
-    # 把各种旧导出 API 统一替换掉
     s = re.sub(r"\bresult\.val\(\)\.export_step\s*\(\s*['\"].*?['\"]\s*\)", "exporters.export(result, 'model.step')", s)
     s = re.sub(r"\bresult\.val\(\)\.export_stl\s*\(\s*['\"].*?['\"]\s*\)", "exporters.export(result, 'model.stl')", s)
 
     s = re.sub(r"\bresult\.exportStep\s*\(\s*['\"].*?['\"]\s*\)", "exporters.export(result, 'model.step')", s)
     s = re.sub(r"\bresult\.exportStl\s*\(\s*['\"].*?['\"]\s*\)", "exporters.export(result, 'model.stl')", s)
-
-    s = re.sub(r"\bcq\.exporters\.export\s*\(\s*result\s*,\s*['\"].*?['\"]\s*\)", "exporters.export(result, 'model.step')", s, count=1)
-    # 第二个 exporters.export 可能被替换成 step，这里补一个更稳健的兜底：如果只有一个 export，则追加 stl
-    # 这一步不做“智能解析”，而是直接在脚本末尾追加“强制导出校验块”，保证收敛。
 
     footer = r"""
 # ---- MAAS enforced export block (do not remove) ----
@@ -188,7 +312,6 @@ def agent2_cad_writer(run_id: str, paths: Dict[str, Path], plan_path: Path, agen
     if m:
         code = m.group(1).strip()
 
-    # 强制规范化导出（这一条是“保证不再失败”的关键）
     code = _normalize_cadquery_export(code)
 
     ensure_dir(paths["artifacts"] / "render")
@@ -214,17 +337,24 @@ def agent3_executor(run_id: str, paths: Dict[str, Path], cad_script_path: Path, 
         outputs={"output_manifest": str(manifest_path), "exec_log": str(exec_log_path), "event": str(event_path)},
     ))
 
-    # 用 venv 的 python 执行，cwd=脚本所在目录（attempt_xx）
     rc, out = _safe_run([sys.executable, str(Path(cad_script_path).resolve())], cwd=Path(cad_script_path).parent, timeout=180)
     write_text(exec_log_path, out)
 
-    render_dir = paths["artifacts"] / "render"
-    imgs = list_rendered_images(render_dir)
+    render_dir = ensure_dir(paths["artifacts"] / "render")
 
     step_files = [str(p) for p in paths["artifacts"].glob("*.step")] + [str(p) for p in paths["artifacts"].glob("*.stp")]
     stl_files = [str(p) for p in paths["artifacts"].glob("*.stl")]
 
-    # ✅ 关键修复：rc=0 但没输出文件 => 仍然算 fail
+    # ---- NEW: render 6 views if possible ----
+    render_msg = ""
+    if rc == 0 and stl_files:
+        # 只要有 STL，就生成/刷新 6 视角图（提升 4A 稳健性）
+        ok, msg = _render_stl_to_png_multi6(Path(stl_files[0]), render_dir)
+        render_msg = msg if ok else f"render_failed: {msg}"
+
+    imgs = list_rendered_images(render_dir)
+
+    # 原逻辑：rc=0 且有 step/stl 才算成功
     has_outputs = bool(step_files or stl_files)
     status = "success" if (rc == 0 and has_outputs) else "fail"
     error_msg = ""
@@ -232,6 +362,11 @@ def agent3_executor(run_id: str, paths: Dict[str, Path], cad_script_path: Path, 
         error_msg = f"Execution failed, return code {rc}"
     elif not has_outputs:
         error_msg = "Execution returned 0 but produced no STEP/STL outputs."
+
+    # ---- NEW: 你要求 4A 必须基于渲染图，所以这里补一条“无图则 fail” ----
+    if status == "success" and not imgs:
+        status = "fail"
+        error_msg = "Execution ok but produced no render images (PNG required for 4A). " + (render_msg or "")
 
     manifest = {
         "run_id": run_id,
@@ -275,26 +410,55 @@ def agent4a_verifier(run_id: str, paths: Dict[str, Path], plan_path: Path, manif
     image_paths = manifest.get("render_images", []) or list_rendered_images(paths["artifacts"] / "render")
     exec_log_tail = _read_text_tail(Path(manifest.get("exec_log_path", paths["artifacts"] / "exec.log.txt")))
 
-    # ✅ 关键：明确告诉 4A：无渲染图时允许“文件级验收 pass”
-    payload = {
+    # 你的硬要求：无图则 fail
+    if not image_paths:
+        report = {
+            "status": "fail",
+            "summary": "No render images provided; geometry verification is impossible.",
+            "issues": [{
+                "severity": "high",
+                "type": "execution",
+                "message": "render_images is empty; PNG render is mandatory for 4A verification",
+                "evidence": [str(manifest_path)]
+            }],
+            "checks": ["render_images_required=true", "render_images_found=0"],
+            "attempt": attempt,
+            "evidence": {
+                "render_images_used": [],
+                "exec_log_tail_included": bool(exec_log_tail),
+            }
+        }
+        write_json(verify_path, report)
+        write_json(event_path, build_event(
+            run_id, "4A", "Agent4A_Verifier", "success",
+            inputs={"plan_json": str(plan_path), "output_manifest": str(manifest_path), "attempt": attempt},
+            outputs={"verify_report": str(verify_path)},
+            message="verify status: fail",
+        ))
+        return verify_path
+
+    content_payload: List[Dict[str, Any]] = [{"type": "text", "text": json.dumps({
         "run_id": run_id,
         "attempt": attempt,
         "plan_json": plan,
         "output_manifest": manifest,
         "exec_log_tail": exec_log_tail,
         "instructions": (
-            "Return STRICT JSON for verify_report.json.\n"
-            "If render_images exist, do geometry/feature checks.\n"
-            "If NO render_images exist, you MUST use file-level acceptance:\n"
-            "- If manifest.status=='success' AND step_files not empty => you may return status='pass' unless plan explicitly demands visual-confirmable features.\n"
-            "- Mention in summary that no images were available.\n"
-            "Output schema: {status: pass|fail, summary, issues[], checks[] }"
+            "You MUST verify geometry based on provided render images. "
+            "Return STRICT JSON only: {status: pass|fail, summary, issues[], checks[]}."
         )
-    }
-
-    content_payload: List[Dict[str, Any]] = [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}]
+    }, ensure_ascii=False)}]
+        
     for p in image_paths[:8]:
-        content_payload.append({"type": "image_url", "image_url": {"url": f"file://{p}"}})
+        try:
+            img = Image.open(p)  # p 是普通文件路径字符串/Path 都行
+            content_payload.append({"type": "image_url", "image_url": {"url": img}})
+        except Exception as e:
+            # 如果某张图损坏/打不开，不要让整个流程崩掉；把原因写进文本证据即可
+            content_payload.append({
+                "type": "text",
+                "text": f"[WARN] Failed to open image {p}: {e}"
+            })
 
     resp = agent.generate_reply(messages=[{"role": "user", "content": content_payload}])
     text = resp if isinstance(resp, str) else resp.get("content", "")
